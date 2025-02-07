@@ -64,11 +64,63 @@ if __name__ == "__main__":
 
     batch_size_train = 1
     batch_size_test = 1
+    
+    
+    # we need to change the directory to the path where the data is stored
+    # out data must be transformed to the format that the custom dataget can understand
+    # the data should be in the following format:
+    # THIS DATA WILL BE USED TO TRAIN THE MODEL DIRECTLY, SO RAW DATA MUST BE SEGMENTED INTO FRAMES OF FACES FIRST
+    
+    """"
+    dataset/                            # dataset root should be *mirrored* into video_path and heart_rate_path
+    ├── videos_path/
+    │   ├── subject_01/
+    │   │   ├── video_01/               # video folder contains 50 frames per video as 2s of 25 fps video
+    │   │   │   ├── frame_0001.jpg
+    │   │   │   ├── frame_0002.jpg
+    │   │   │   ├── ...
+    │   │   ├── video_02/
+    │   │   │   ├── frame_0001.jpg
+    │   │   │   ├── frame_0002.jpg
+    │   │   │   ├── ...
+    │   │   └── ...
+    │   ├── subject_02/
+    │   │   ├── video_01/
+    │   │   │   ├── frame_0001.jpg
+    │   │   │   ├── frame_0002.jpg
+    │   │   │   ├── ...
+    │   │   ├── video_02/
+    │   │   │   ├── frame_0001.jpg
+    │   │   │   ├── ...
+    │   │   └── ...
+    │   └── ...
+    ├── heart_rate_path/
+    │   ├── subject_01/
+    │   │   ├── video_01/
+    │   │   │   ├── Pu_heart_rate.csv   # heart rate file should start with Pu_ and be in csv format
+    │   │   ├── video_02/
+    │   │   │   ├── Pu_heart_rate.csv
+    │   │   └── ...
+    │   ├── subject_02/
+    │   │   ├── video_01/
+    │   │   │   ├── Pu_heart_rate.csv
+    │   │   ├── video_02/
+    │   │   │   ├── Pu_heart_rate.csv
+    │   │   └── ...
+    │   └── ...
+
+    """
+
+    # In terms of labels, the heart rate, it should be in csv format for each video
+    # each csv file should have the following format:
+    # Number of HR samples should be equal to the number of frames in the video
+    # The code expects multiple values
+    # If each CSV contains only one value (currently our case), it won’t align with the frames in the video as the code expects
 
     train_data = datagen.flow_from_directory(directory='/home/ouzar1/Documents/BP4D-ROI',
-                                             label_dir='/home/ouzar1/Documents/pythonProject/Physiology',
-                                             target_size=(120, 160), class_mode='label', batch_size=64,
-                                             frames_per_step=50, shuffle=False)
+                                            label_dir='/home/ouzar1/Documents/pythonProject/Physiology',
+                                            target_size=(120, 160), class_mode='label', batch_size=64,
+                                            frames_per_step=50, shuffle=False)
 
     test_data = datagen.flow_from_directory(directory='/home/ouzar1/Documents/MMSE/ROI',
                                             label_dir='/home/ouzar1/Documents/MMSE/HR',
