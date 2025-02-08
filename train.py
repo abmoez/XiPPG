@@ -25,7 +25,7 @@ if __name__ == "__main__":
     #model = Xception(input_shape=args.input_shape, num_classes=args.num_classes, dropout_rate=args.dropout_rate, l1=args.l1, l2=args.l2)
     model = Xception(input_shape=args.input_shape)
 
-    model.summary()
+    #model.summary()
 
     opt = Adam(learning_rate=0.0001, weight_decay=0.5)
 
@@ -34,15 +34,25 @@ if __name__ == "__main__":
 
 
 
-    # every epoch check validation accuracy scores and save the highest
+    # Every epoch: check 'val_root_mean_squared_error' and save the best weights
     checkpoint_2 = ModelCheckpoint(
-        'weights-{epoch:02d}-{val_root_mean_squared_error:.4f}.h5',
-        monitor='val_root_mean_squared_error',
-        verbose=1, save_best_only=True)
-    # every 10 epochs save weights
-    checkpoint = ModelCheckpoint('weights.{epoch:02d}-{val_root_mean_squared_error:.4f}.h5',
-                                 monitor='val_mean_absolute_error',
-                                 verbose=10, save_best_only=True)
+    'weights-{epoch:02d}-{val_root_mean_squared_error:.4f}.weights.h5',  # <- must end in `.weights.h5`
+    monitor='val_root_mean_squared_error',
+    verbose=1,
+    save_best_only=True,
+    save_weights_only=True
+)
+
+
+# Every 10 epochs: save weights (based on 'val_mean_absolute_error')
+    checkpoint = ModelCheckpoint(
+    'weights.{epoch:02d}-{val_root_mean_squared_error:.4f}.weights.h5',
+    monitor='val_mean_absolute_error',
+    verbose=10,
+    save_best_only=True,
+    save_weights_only=True  # <--- MUST be True for .h5
+    # Optionally specify save_freq or period for custom saving intervals
+)
     history_checkpoint = CSVLogger("history.csv", append=False)
 
     # use tensorboard can watch the change in time
@@ -117,17 +127,17 @@ if __name__ == "__main__":
     # The code expects multiple values
     # If each CSV contains only one value (currently our case), it won’t align with the frames in the video as the code expects
 
-    train_data = datagen.flow_from_directory(directory='/home/ouzar1/Documents/BP4D-ROI',
-                                            label_dir='/home/ouzar1/Documents/pythonProject/Physiology',
-                                            target_size=(120, 160), class_mode='label', batch_size=64,
+    train_data = datagen.flow_from_directory(directory='dataset/videos_path',
+                                            label_dir='dataset/heart_rate_path',
+                                            target_size=(120, 160), class_mode='label', batch_size=4,
                                             frames_per_step=50, shuffle=False)
 
-    test_data = datagen.flow_from_directory(directory='/home/ouzar1/Documents/MMSE/ROI',
-                                            label_dir='/home/ouzar1/Documents/MMSE/HR',
-                                            target_size=(120, 160), class_mode='label', batch_size=64,
+    test_data = datagen.flow_from_directory(directory='dataset/videos_path',
+                                            label_dir='dataset/heart_rate_path',
+                                            target_size=(120, 160), class_mode='label', batch_size=4,
                                             frames_per_step=50, shuffle=False)
 
-    history = model.fit(train_data, epochs=100,
+    history = model.fit(train_data, epochs=3,
                         steps_per_epoch=len(train_data.filenames) // 3200,
                         validation_data=test_data, validation_steps=len(test_data.filenames) // 3200,
                         callbacks=[history_checkpoint, checkpoint_2])

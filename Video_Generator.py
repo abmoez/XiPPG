@@ -22,6 +22,8 @@ import warnings
 import pandas as pd
 import csv
 from collections import Counter
+from tensorflow.keras.utils import Sequence
+
 
 try:
     from keras import backend as K
@@ -783,7 +785,7 @@ def _list_valid_filenames_in_directory(directory, white_list_formats,
     return sorted(classes), sorted(filenames)
 
 
-class DirectoryIterator(Iterator):
+class DirectoryIterator(Sequence):
     """Iterator capable of reading images from a directory on disk.
     # Arguments
         directory: Path to the directory to read images from.
@@ -821,322 +823,500 @@ class DirectoryIterator(Iterator):
 
     def __init__(self, directory, image_data_generator,
                  label_dir,
-                 target_size=(256, 256), color_mode='rgb',
-                 classes=None, class_mode='categorical',
-                 frames_per_step=4,
-                 batch_size=1, shuffle=True, seed=None,
+                 target_size=(120, 160), color_mode='rgb',
+                 classes=None, class_mode='label',
+                 frames_per_step=50,
+                 batch_size=4, shuffle=True, seed=None,
                  data_format=None,
                  save_to_dir=None, save_prefix='', save_format='png',
                  follow_links=False):
-        if data_format is None:
-            data_format = K.image_data_format()
+        # Save basic parameters
         self.directory = directory
-        self.label = label_dir
+        self.label_dir = label_dir
+        self.target_size = target_size
+        self.batch_size = batch_size
         self.frames_per_step = frames_per_step
+        self.shuffle = shuffle
+        self.data_format = data_format if data_format else 'channels_last'
         self.image_data_generator = image_data_generator
-        self.target_size = tuple(target_size)
-        if color_mode not in {'rgb', 'grayscale'}:
-            raise ValueError('Invalid color mode:', color_mode,
-                             '; expected "rgb" or "grayscale".')
-        self.color_mode = color_mode
-        self.data_format = data_format
-        if self.color_mode == 'rgb':
-            if self.data_format == 'channels_last':
-                self.image_shape = self.target_size + (3,)
-            else:
-                self.image_shape = (3,) + self.target_size
-        else:
-            if self.data_format == 'channels_last':
-                self.image_shape = self.target_size + (1,)
-            else:
-                self.image_shape = (1,) + self.target_size
-        self.classes = classes
-        if class_mode not in {'categorical', 'binary', 'sparse',
-                              'input', 'label', None}:
-            raise ValueError('Invalid class_mode:', class_mode,
-                             '; expected one of "categorical", '
-                             '"binary", "sparse", "input"'
-                             ' or None.')
-        self.class_mode = class_mode
         self.save_to_dir = save_to_dir
         self.save_prefix = save_prefix
         self.save_format = save_format
-
-        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp', 'ppm'}
-
-        # first, count the number of samples and classes
-        self.samples = 0
-        pool = multiprocessing.pool.ThreadPool()
-        function_partial = partial(_count_valid_files_in_directory,
-                                   white_list_formats=white_list_formats,
-                                   follow_links=follow_links)
-        if not classes:
-            classes = []
-            for subdir in sorted(os.listdir(directory)):
-                if os.path.isdir(os.path.join(directory, subdir)):
-                    tasks = os.path.join(directory, subdir)
-                    for task in sorted(os.listdir(tasks)):
-                        cls = os.path.join(tasks, task)
-                        classes.append(cls)
-
+        self.follow_links = follow_links
+        
+        # --- Adjusted scanning ---
+        # Instead of scanning immediate subdirectories, we now scan subject folders
+        # and then their subdirectories (each video folder)
+        video_folders = []
+        for subject in sorted(os.listdir(directory)):
+            subject_path = os.path.join(directory, subject)
+            if os.path.isdir(subject_path):
+                for video in sorted(os.listdir(subject_path)):
+                    video_path = os.path.join(subject_path, video)
+                    if os.path.isdir(video_path):
+                        video_folders.append(video_path)
+        # If no custom classes are provided, we use the video folder paths
+        if classes is None:
+            classes = video_folders
+        self.classes = classes
         self.num_class = len(classes)
+        # Build a dictionary mapping each folder (its absolute or relative path) to an index
         self.class_indices = dict(zip(classes, range(len(classes))))
-        # print(classes)
-
-        self.samples = sum(pool.map(function_partial,
-                                    (os.path.join(directory, subdir)
-                                     for subdir in classes)))
-        self.samples1 = pool.map(function_partial,
-                                 (os.path.join(directory, subdir)
-                                  for subdir in classes))
-        # self.samples2 = pool.map(function_partial,(os.path.join(label_dir, subdir) for subdir in classes_hr))
-
-        # label.append(b.most_common()[0][0])
-        # print(self.samples1)
-        print('Found %d images belonging to %d classes.' %
-              (self.samples, self.num_class))
-
-        # second, build an index of the images in the different class subfolders
-        results = []
-
-        # label = np.loadtxt('label.csv', delimiter=',')
-        # for l in label:
-        # self.label.append(l)
-
-        self.filenames = []
-        self.HR = []
-        self.classes = np.zeros((self.samples,), dtype='int32')
-        i = 0
-        # for dirpath in (os.path.join(directory, subdir) for subdir in classes):
-        for dirpath in classes:
-            # print(dirpath)
-            results.append(pool.apply_async(_list_valid_filenames_in_directory,
-                                            (dirpath, white_list_formats,
-                                             self.class_indices, follow_links)))
-        batches = []
-        for res in results:
-            classes, filenames = res.get()
-            self.classes[i:i + len(classes)] = classes
-
-            # build batch of image data
-            filename = filenames
-
-            batches.append(filenames)
-            # for j in range((i // self.frames_per_step)*self.frames_per_step):
-            # print(len(self.filenames))
-            i += len(classes)
-        for j in batches:
-            for k in range((len(j) // self.frames_per_step)):
-                batch = j[k * self.frames_per_step:(k + 1) * self.frames_per_step]
-                for x in batch:
-                    self.filenames.append(x)
-
-        len_images = self.samples1
-
-        classes_hr = []
-        batches_hr = []
-        for subdir in sorted(os.listdir(label_dir)):
-            if os.path.isdir(os.path.join(label_dir, subdir)):
-                tasks = os.path.join(label_dir, subdir)
-                for task in sorted(os.listdir(tasks)):
-                    cls = os.path.join(tasks, task)
-                    classes_hr.append(cls)
-        for ti in classes_hr:
-            list_dir2 = os.listdir(ti)
-            heart_rate = [filename for filename in list_dir2 if filename.startswith("Pu")]
-            for hr in heart_rate:
-                Heart_rate_resampled = os.path.join(ti + '/' + hr)
-                # df = pd.read_csv(Heart_rate_resampled, index_col=0)
-                # batches_hr.append(df.index)
-                #print(Heart_rate_resampled)
-                with open(Heart_rate_resampled, 'r') as file:
-                    heart = [line.rstrip('\n') for line in file]
-                    batches_hr.append(heart)
-        li = []
-        y1 = []
-        ii = []
-        Heart_Rate = []
-        for filename in batches_hr:
-            # df = pd.read_csv(filename, sep='\t')
-            #sps = round(1000 / 25)
-            #resample = filename[0::sps]
-            resample = filename
-            li.append(resample)
-
-        for i in range(len(li)):
-            A = self.samples1[i]
-            B = li[i]
-            xx = len(B) - A
-            print(xx, len(B) , A)
-            df = pd.DataFrame(B)
-            df.drop(df.tail(xx).index, inplace=True)
-            # heart_rate = df.iloc[:, 0]
-            # heart_rate = df.data.tolist()
-            heart_rate = df.iloc[:, 0].tolist()
-            heart_rate = [round(float(i)) for i in heart_rate]
-            ii.append(heart_rate)
-            # li1.append(heart_rate)
-            # heart_rate = df
-            mean = np.mean(heart_rate)
-            std_dev = np.std(heart_rate)
-            # std = std_dev if (std_dev < 0.2 * mean) else 0.2 * mean
-            # print(mean)
-            #print(heart_rate)
-            ##### a vérifier ###############
-            #slidingAvg(1, heart_rate)
-            ##########################
-            y = heart_rate
-            #print(len(y))
-            for k in range((len(y)) // self.frames_per_step):
-                batches_hr = y[k * self.frames_per_step:(k + 1) * self.frames_per_step]
-                for i in batches_hr:
-                    Heart_Rate.append(i)
-
-        print(len(Heart_Rate), len(self.filenames))
-        self.heart_rate = Heart_Rate
-        # print(len(self.heart_rate))
+        
+        # Use multiprocessing to count images in each video folder
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp', 'ppm'}
+        pool = multiprocessing.pool.ThreadPool()
+        self.samples = 0
+        folder_counts = []
+        for folder in classes:
+            cnt = _count_valid_files_in_directory(folder, white_list_formats, follow_links)
+            folder_counts.append(cnt)
+            self.samples += cnt
         pool.close()
         pool.join()
-        super(DirectoryIterator, self).__init__(
-            len(self.filenames), batch_size, frames_per_step, shuffle, seed)
 
-    def next(self):
-        """For python 2.x.
-        # Returns
-            The next batch.
-        """
-        with self.lock:
-            index_array, current_index, current_batch_size = next(
-                self.index_generator)
-        # The transformation of images is not under thread lock
-        # so it can be done in parallel
-        batch_x = np.zeros((self.batch_size,) + (self.frames_per_step,) +
-                           self.image_shape, dtype=K.floatx())  # # my addition of +(1,)
-        batch_y = np.zeros((self.batch_size,))
-        batch_x1 = np.zeros((self.frames_per_step * self.batch_size,) +
-                            self.image_shape, dtype=K.floatx())  # # my addition of +(1,)
+        # Build a list of filenames (with relative paths) for each video folder.
+        self.filenames = []
+        for folder in classes:
+            # _list_valid_filenames_in_directory returns (classes, filenames)
+            # Make sure that the returned filenames are relative to an appropriate base.
+            cls, fnames = _list_valid_filenames_in_directory(folder, white_list_formats, self.class_indices, follow_links)
+            # Here we assume fnames are relative paths from the parent of folder;
+            # adjust if necessary.
+            self.filenames.extend(fnames)
 
-        batches = []
-        batches55 = []
+        print("Found %d images belonging to %d classes." % (self.samples, self.num_class))
 
-        batches555 = []
-        # for kk in range(self.frames_per_step):
-        for i in range(int(len(index_array))):
-            hr = self.heart_rate[index_array[i]]
-            batches.append(hr)
-        for k in range((len(batches)) // self.frames_per_step):
-            batches_hr1 = batches[k * self.frames_per_step:(k + 1) * self.frames_per_step]
-            batches55.append(batches_hr1)
-        # print(len(batches))
-        for batch_hr in batches55:
-            # b = Counter(batch_hr)
-            # label = np.array(Counter(batches55).most_common()[0][0]).reshape(-1)
-            #label1 = Counter(batch_hr).most_common()[0][0]
-            label1 = np.mean(batch_hr)
-            batches555.append(label1)
+        # Optionally, if shuffle is true, create an index list
+        self.index_array = np.arange(len(self.filenames))
+        if self.shuffle:
+            np.random.shuffle(self.index_array)
 
-        # for j in range(batch_y.shape[0]):
-        # batch_y[:k] = label
+    def __len__(self):
+        # Total number of batches per epoch. Adjust so that each batch contains frames_per_step images.
+        return len(self.filenames) // (self.batch_size * self.frames_per_step)
 
-        batch_y = np.array(batches555)
+    def __getitem__(self, index):
+        # Compute indexes for this batch
+        start = index * self.batch_size * self.frames_per_step
+        end = start + self.batch_size * self.frames_per_step
+        batch_file_indexes = self.index_array[start:end]
+        # Initialize arrays for a batch of videos.
+        # Each video is assumed to have frames_per_step frames.
+        # Here we assume images are resized to target_size and with 3 channels.
+        batch_x = np.zeros((self.batch_size, self.frames_per_step, 
+                            self.target_size[0], self.target_size[1], 3), dtype=np.float32)
+        batch_y = np.zeros((self.batch_size,), dtype=np.float32)  # or other shape as needed
 
-        grayscale = self.color_mode == 'grayscale'
-        # print(len(self.filenames//self.frames_per_step))
-        # for j in range(0,1):
-        # for kk in range(self.frames_per_step):
-        # for i in range(int(len(self.filenames))):
-        # print(index_array[i])
-        # for i in index_array:
-        # a = index_array[i]
+        # Process each video in the batch:
+        for i in range(self.batch_size):
+            # For each video, get its list of frame filenames.
+            # Depending on how _list_valid_filenames_in_directory organized them,
+            # you might need to group every consecutive 'frames_per_step' images.
+            video_filenames = self.filenames[ (i*self.frames_per_step) : ((i+1)*self.frames_per_step) ]
+            frames = []
+            for fname in video_filenames:
+                # fname is assumed to be relative to the videos_path directory.
+                img_path = os.path.join(self.directory, fname)
+                img = load_img(img_path, grayscale=False, target_size=self.target_size)
+                x = img_to_array(img, data_format=self.data_format)
+                x /= 255.0
+                frames.append(x)
+            # Stack frames along a new axis
+            if len(frames) == self.frames_per_step:
+                batch_x[i] = np.stack(frames, axis=0)
+            else:
+                warnings.warn("Not enough frames in video, got %d vs %d" % (len(frames), self.frames_per_step))
+            # For labels, load the corresponding CSV from the mirrored heart_rate_path.
+            # Determine the corresponding folder by replacing 'videos_path' with 'heart_rate_path'
+            # and appending 'Pu_reading.csv' in that folder.
+            # Here we assume that fname contains the folder information.
+            folder_relative = os.path.dirname(fname)  # e.g. subject_01/folder_1
+            hr_folder = os.path.join(self.label_dir, folder_relative)
+            csv_files = [f for f in os.listdir(hr_folder) if f.startswith("Pu") and f.endswith(".csv")]
+            if csv_files:
+                csv_path = os.path.join(hr_folder, csv_files[0])
+                # For simplicity, assume the CSV contains one reading, or average if multiple.
+                try:
+                    reading = float(np.loadtxt(csv_path, delimiter=','))
+                except Exception:
+                    reading = 0.0
+            else:
+                reading = 0.0
+            batch_y[i] = reading
 
-        for i in range(int(len(index_array))):
-            fname = self.filenames[index_array[i]]
-            # fname = self.filenames[i]
-            img = load_img(os.path.join(self.directory, fname),
-                           grayscale=False,
-                           target_size=self.target_size)
-            x = img_to_array(img, data_format=self.data_format)
-            x /= 255
-            # print(x.shape)
-            # x = self.image_data_generator.random_transform(x)
-            # x = self.image_data_generator.standardize(x)
-            # x = self.image_data_generator.change_dims(x)  # my addition
-            batch_x1[i] = x
-        batch_x = batch_x1.reshape(-1, self.frames_per_step, 120, 160, 3)
-        #print(batch_x.shape)
-        print(os.path.join(self.directory, fname))
-
-        # batch_x[:i] = x
-        #print(np.mean(batch_x), batch_y)
-
-        # optionally save augmented images to disk for debugging purposes
-        if self.save_to_dir:
-            for i in range(current_batch_size):
-                img = array_to_img(batch_x[i], self.data_format, scale=True)
-                fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
-                                                                  index=current_index + i,
-                                                                  hash=np.random.randint(
-                                                                      1e4),
-                                                                  format=self.save_format)
-                img.save(os.path.join(self.save_to_dir, fname))
-        # build batch of labels
-        if self.class_mode == 'input':
-            batch_y = batch_x.copy()
-        elif self.class_mode == 'sparse':
-            batch_y = self.classes[index_array]
-        elif self.class_mode == 'binary':
-            batch_y = self.classes[index_array].astype(K.floatx())
-        elif self.class_mode == 'categorical':
-            batch_y = np.zeros(
-                (len(batch_x), self.num_class), dtype=K.floatx())
-            for i, label in enumerate(self.classes[index_array]):
-                batch_y[i, label] = 1.
-        elif self.class_mode == 'label':
-
-            batch_y = batch_y
-            # batch_y = np.zeros(self.batch_size,)
-            # label = np.loadtxt('label.csv', delimiter=',')
-            # for l in np.nditer(label):
-            # for l in range(len(label)):
-            # label = data[1]
-            # batch_y = l
-
-            # batch_y.append(batch_y)
-            # print(batch_y.shape)
-            # print(batch_y.size)
-            # batch_y = label
-        else:
-            return batch_x
-        print("batch is loaded")
-        # batch_y = np.zeros(self.batch_size,)
-        # batch_y = np.array([l for l in np.nditer(label)])
         return batch_x, batch_y
 
+    def on_epoch_end(self):
+        # Optionally, reshuffle indexes at the end of each epoch.
+        if self.shuffle:
+            np.random.shuffle(self.index_array)  
 
-if __name__ == '__main__':
+#     def __init__(self, directory, image_data_generator,
+#                  label_dir,
+#                  target_size=(256, 256), color_mode='rgb',
+#                  classes=None, class_mode='categorical',
+#                  frames_per_step=4,
+#                  batch_size=1, shuffle=True, seed=None,
+#                  data_format=None,
+#                  save_to_dir=None, save_prefix='', save_format='png',
+#                  follow_links=False):
+#         if data_format is None:
+#             data_format = K.image_data_format()
+#         self.directory = directory
+#         self.label = label_dir
+#         self.frames_per_step = frames_per_step
+#         self.image_data_generator = image_data_generator
+#         self.target_size = tuple(target_size)
+#         if color_mode not in {'rgb', 'grayscale'}:
+#             raise ValueError('Invalid color mode:', color_mode,
+#                              '; expected "rgb" or "grayscale".')
+#         self.color_mode = color_mode
+#         self.data_format = data_format
+#         if self.color_mode == 'rgb':
+#             if self.data_format == 'channels_last':
+#                 self.image_shape = self.target_size + (3,)
+#             else:
+#                 self.image_shape = (3,) + self.target_size
+#         else:
+#             if self.data_format == 'channels_last':
+#                 self.image_shape = self.target_size + (1,)
+#             else:
+#                 self.image_shape = (1,) + self.target_size
+#         self.classes = classes
+#         if class_mode not in {'categorical', 'binary', 'sparse',
+#                               'input', 'label', None}:
+#             raise ValueError('Invalid class_mode:', class_mode,
+#                              '; expected one of "categorical", '
+#                              '"binary", "sparse", "input"'
+#                              ' or None.')
+#         self.class_mode = class_mode
+#         self.save_to_dir = save_to_dir
+#         self.save_prefix = save_prefix
+#         self.save_format = save_format
+#         self.batch_size = batch_size
+#         white_list_formats = {'png', 'jpg', 'jpeg', 'bmp', 'ppm'}
 
-    datagen = ImageDataGenerator()
-    train_data = datagen.flow_from_directory(directory='/videos path',
-                                             label_dir='/heart rate path',
-                                             target_size=(120, 160), class_mode='label', batch_size=1,
-                                             frames_per_step=50, shuffle=False)
+#         # first, count the number of samples and classes
+#         self.samples = 0
+#         pool = multiprocessing.pool.ThreadPool()
+#         function_partial = partial(_count_valid_files_in_directory,
+#                                    white_list_formats=white_list_formats,
+#                                    follow_links=follow_links)
+#         if not classes:
+#             classes = []
+#             for subdir in sorted(os.listdir(directory)):
+#                 if os.path.isdir(os.path.join(directory, subdir)):
+#                     tasks = os.path.join(directory, subdir)
+#                     for task in sorted(os.listdir(tasks)):
+#                         cls = os.path.join(tasks, task)
+#                         classes.append(cls)
 
-    # print(train_data.filenames)
-    # for data in train_data:
-    # image = data[0]
-    # print(image.shape)
-    for data in train_data:
-        image = data[0]
-        label = data[1]
-        #print(image.shape, label.shape)
-        #print(label)
-        # print(np.mean(image),label)
-        img = image.reshape(-1, 160, 120, 3)
+#         self.num_class = len(classes)
+#         self.class_indices = dict(zip(classes, range(len(classes))))
+#         # print(classes)
 
-        for i in range(train_data.batch_size * train_data.frames_per_step):
-            imag = array_to_img(img[i], train_data.data_format, scale=True)
-            #opencvImage = cv2.cvtColor(np.array(imag), cv2.COLOR_RGB2BGR)
-            opencvImage = np.array(imag)
-            cv2.imshow('img', opencvImage)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+#         self.samples = sum(pool.map(function_partial,
+#                                     (os.path.join(directory, subdir)
+#                                      for subdir in classes)))
+#         self.samples1 = pool.map(function_partial,
+#                                  (os.path.join(directory, subdir)
+#                                   for subdir in classes))
+#         # self.samples2 = pool.map(function_partial,(os.path.join(label_dir, subdir) for subdir in classes_hr))
+
+#         # label.append(b.most_common()[0][0])
+#         # print(self.samples1)
+#         print('Found %d images belonging to %d classes.' %
+#               (self.samples, self.num_class))
+
+#         # second, build an index of the images in the different class subfolders
+#         results = []
+
+#         # label = np.loadtxt('label.csv', delimiter=',')
+#         # for l in label:
+#         # self.label.append(l)
+
+#         self.filenames = []
+#         self.HR = []
+#         self.classes = np.zeros((self.samples,), dtype='int32')
+#         i = 0
+#         # for dirpath in (os.path.join(directory, subdir) for subdir in classes):
+#         for dirpath in classes:
+#             # print(dirpath)
+#             results.append(pool.apply_async(_list_valid_filenames_in_directory,
+#                                             (dirpath, white_list_formats,
+#                                              self.class_indices, follow_links)))
+#         batches = []
+#         for res in results:
+#             classes, filenames = res.get()
+#             self.classes = list(self.classes)  # Convert to a list if it's an ndarray
+#             self.classes.extend(classes)  # Append new elements
+#             self.classes = np.array(self.classes)  # Convert back to a NumPy array
+
+#             # build batch of image data
+#             filename = filenames
+
+#             batches.append(filenames)
+#             # for j in range((i // self.frames_per_step)*self.frames_per_step):
+#             # print(len(self.filenames))
+#             i += len(classes)
+#         for j in batches:
+#             for k in range((len(j) // self.frames_per_step)):
+#                 batch = j[k * self.frames_per_step:(k + 1) * self.frames_per_step]
+#                 for x in batch:
+#                     self.filenames.append(x)
+
+#         len_images = self.samples1
+
+#         classes_hr = []
+#         batches_hr = []
+#         for subdir in sorted(os.listdir(label_dir)):
+#             if os.path.isdir(os.path.join(label_dir, subdir)):
+#                 tasks = os.path.join(label_dir, subdir)
+#                 for task in sorted(os.listdir(tasks)):
+#                     cls = os.path.join(tasks, task)
+#                     classes_hr.append(cls)
+# #########################################
+# # In DirectoryIterator.__init__ (or wherever
+# # you currently parse the CSV lines)...
+# #########################################
+
+#         for ti in classes_hr:
+#             list_dir2 = os.listdir(ti)
+#             # Instead of expecting multiple lines, we adapt:
+#             heart_rate_files = [filename for filename in list_dir2 
+#                                 if filename.startswith("Pu") and filename.endswith(".csv")]
+            
+#             for hr_file in heart_rate_files:
+#                 hr_path = os.path.join(ti, hr_file)
+                
+#                 # Read the CSV as if it only has one value:
+#                 with open(hr_path, 'r') as f:
+#                     lines = [line.strip() for line in f if line.strip()]  # skip empty lines
+#                     if not lines:
+#                         # No data in file, handle error or default
+#                         single_hr_value = 0.0
+#                     else:
+#                         # parse one line, e.g.  "72.5"
+#                         single_hr_value = float(lines[0])  
+#                         # If there's more than one line, either ignore or handle differently:
+#                         # single_hr_value = float(lines[0])  # or average all lines, etc.
+                        
+#                 # Now replicate that single value as many times as frames you expect
+#                 # for that video. "frames_count" is the number of frames (jpg files).
+#                 # If you have that count already, you can replicate:
+#                 frames_count = 50  # e.g. your code might track it in self.samples1[i]
+#                 repeated = [single_hr_value] * frames_count
+                
+#                 # Store the repeated list in batches_hr or however
+#                 # you store the multi-line data right now:
+#                 batches_hr.append(repeated)
+
+#         li = []
+#         y1 = []
+#         ii = []
+#         Heart_Rate = []
+#         for filename in batches_hr:
+#             # df = pd.read_csv(filename, sep='\t')
+#             #sps = round(1000 / 25)
+#             #resample = filename[0::sps]
+#             resample = filename
+#             li.append(resample)
+
+#         for i in range(len(li)):
+#             A = self.samples1[i]
+#             B = li[i]
+#             xx = len(B) - A
+#             print(xx, len(B) , A)
+#             df = pd.DataFrame(B)
+#             df.drop(df.tail(xx).index, inplace=True)
+#             # heart_rate = df.iloc[:, 0]
+#             # heart_rate = df.data.tolist()
+#             heart_rate = df.iloc[:, 0].tolist()
+#             heart_rate = [round(float(i)) for i in heart_rate]
+#             ii.append(heart_rate)
+#             # li1.append(heart_rate)
+#             # heart_rate = df
+#             mean = np.mean(heart_rate)
+#             std_dev = np.std(heart_rate)
+#             # std = std_dev if (std_dev < 0.2 * mean) else 0.2 * mean
+#             # print(mean)
+#             #print(heart_rate)
+#             ##### a vérifier ###############
+#             #slidingAvg(1, heart_rate)
+#             ##########################
+#             y = heart_rate
+#             #print(len(y))
+#             for k in range((len(y)) // self.frames_per_step):
+#                 batches_hr = y[k * self.frames_per_step:(k + 1) * self.frames_per_step]
+#                 for i in batches_hr:
+#                     Heart_Rate.append(i)
+
+#         print(len(Heart_Rate), len(self.filenames))
+#         self.heart_rate = Heart_Rate
+#         # print(len(self.heart_rate))
+#         pool.close()
+#         pool.join()
+#         super(DirectoryIterator, self).__init__(
+#             len(self.filenames), batch_size, frames_per_step, shuffle, seed)
+
+#     def __len__(self):
+#         # Return the total number of batches per epoch.
+#         # For example:
+#         return len(self.filenames) // self.batch_size
+
+#     def __getitem__(self, index):
+#         # Compute the batch corresponding to the given index.
+#         # Example:
+#         batch_filenames = self.filenames[index * self.batch_size:(index + 1) * self.batch_size]
+#         batch_x = []
+#         batch_y = []
+#         for fname in batch_filenames:
+#             img = load_img(os.path.join(self.directory, fname),
+#                            grayscale=False,
+#                            target_size=self.target_size)
+#             x = img_to_array(img, data_format=self.data_format)
+#             x /= 255.0
+#             batch_x.append(x)
+#             # Append corresponding label from self.heart_rate or self.classes
+#         return np.array(batch_x), np.array(batch_y)
+#     # def next(self):
+#     #     """For python 2.x.
+#     #     # Returns
+#     #         The next batch.
+#     #     """
+#     #     with self.lock:
+#     #         index_array, current_index, current_batch_size = next(
+#     #             self.index_generator)
+#     #     # The transformation of images is not under thread lock
+#     #     # so it can be done in parallel
+#     #     batch_x = np.zeros((self.batch_size,) + (self.frames_per_step,) +
+#     #                        self.image_shape, dtype=K.floatx())  # # my addition of +(1,)
+#     #     batch_y = np.zeros((self.batch_size,))
+#     #     batch_x1 = np.zeros((self.frames_per_step * self.batch_size,) +
+#     #                         self.image_shape, dtype=K.floatx())  # # my addition of +(1,)
+
+#     #     batches = []
+#     #     batches55 = []
+
+#     #     batches555 = []
+#     #     # for kk in range(self.frames_per_step):
+#     #     for i in range(int(len(index_array))):
+#     #         hr = self.heart_rate[index_array[i]]
+#     #         batches.append(hr)
+#     #     for k in range((len(batches)) // self.frames_per_step):
+#     #         batches_hr1 = batches[k * self.frames_per_step:(k + 1) * self.frames_per_step]
+#     #         batches55.append(batches_hr1)
+#     #     # print(len(batches))
+#     #     for batch_hr in batches55:
+#     #         # b = Counter(batch_hr)
+#     #         # label = np.array(Counter(batches55).most_common()[0][0]).reshape(-1)
+#     #         #label1 = Counter(batch_hr).most_common()[0][0]
+#     #         label1 = np.mean(batch_hr)
+#     #         batches555.append(label1)
+
+#     #     # for j in range(batch_y.shape[0]):
+#     #     # batch_y[:k] = label
+
+#     #     batch_y = np.array(batches555)
+
+#     #     grayscale = self.color_mode == 'grayscale'
+#     #     # print(len(self.filenames//self.frames_per_step))
+#     #     # for j in range(0,1):
+#     #     # for kk in range(self.frames_per_step):
+#     #     # for i in range(int(len(self.filenames))):
+#     #     # print(index_array[i])
+#     #     # for i in index_array:
+#     #     # a = index_array[i]
+
+#     #     for i in range(int(len(index_array))):
+#     #         fname = self.filenames[index_array[i]]
+#     #         # fname = self.filenames[i]
+#     #         img = load_img(os.path.join(self.directory, fname),
+#     #                        grayscale=False,
+#     #                        target_size=self.target_size)
+#     #         x = img_to_array(img, data_format=self.data_format)
+#     #         x /= 255
+#     #         # print(x.shape)
+#     #         # x = self.image_data_generator.random_transform(x)
+#     #         # x = self.image_data_generator.standardize(x)
+#     #         # x = self.image_data_generator.change_dims(x)  # my addition
+#     #         batch_x1[i] = x
+#     #     batch_x = batch_x1.reshape(-1, self.frames_per_step, 120, 160, 3)
+#     #     #print(batch_x.shape)
+#     #     print(os.path.join(self.directory, fname))
+
+#     #     # batch_x[:i] = x
+#     #     #print(np.mean(batch_x), batch_y)
+
+#     #     # optionally save augmented images to disk for debugging purposes
+#     #     if self.save_to_dir:
+#     #         for i in range(current_batch_size):
+#     #             img = array_to_img(batch_x[i], self.data_format, scale=True)
+#     #             fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
+#     #                                                               index=current_index + i,
+#     #                                                               hash=np.random.randint(
+#     #                                                                   1e4),
+#     #                                                               format=self.save_format)
+#     #             img.save(os.path.join(self.save_to_dir, fname))
+#     #     # build batch of labels
+#     #     if self.class_mode == 'input':
+#     #         batch_y = batch_x.copy()
+#     #     elif self.class_mode == 'sparse':
+#     #         batch_y = self.classes[index_array]
+#     #     elif self.class_mode == 'binary':
+#     #         batch_y = self.classes[index_array].astype(K.floatx())
+#     #     elif self.class_mode == 'categorical':
+#     #         batch_y = np.zeros(
+#     #             (len(batch_x), self.num_class), dtype=K.floatx())
+#     #         for i, label in enumerate(self.classes[index_array]):
+#     #             batch_y[i, label] = 1.
+#     #     elif self.class_mode == 'label':
+
+#     #         batch_y = batch_y
+#     #         # batch_y = np.zeros(self.batch_size,)
+#     #         # label = np.loadtxt('label.csv', delimiter=',')
+#     #         # for l in np.nditer(label):          
+#     #         # for l in range(len(label)):
+#     #         # label = data[1]
+#     #         # batch_y = l
+
+#     #         # batch_y.append(batch_y)
+#     #         # print(batch_y.shape)
+#     #         # print(batch_y.size)
+#     #         # batch_y = label
+#     #     else:
+#     #         return batch_x
+#     #     print("batch is loaded")
+#     #     # batch_y = np.zeros(self.batch_size,)
+#     #     # batch_y = np.array([l for l in np.nditer(label)])
+#     #     return batch_x, batch_y
+
+
+# # if __name__ == '__main__':
+
+# #     datagen = ImageDataGenerator()
+# #     train_data = datagen.flow_from_directory(directory='/videos path',
+# #                                              label_dir='/heart rate path',
+# #                                              target_size=(120, 160), class_mode='label', batch_size=1,
+# #                                              frames_per_step=50, shuffle=False)
+
+# #     # print(train_data.filenames)
+# #     # for data in train_data:
+# #     # image = data[0]
+# #     # print(image.shape)
+# #     for data in train_data:
+# #         image = data[0]
+# #         label = data[1]
+# #         #print(image.shape, label.shape)
+# #         #print(label)
+# #         # print(np.mean(image),label)
+# #         img = image.reshape(-1, 160, 120, 3)
+
+# #         for i in range(train_data.batch_size * train_data.frames_per_step):
+# #             imag = array_to_img(img[i], train_data.data_format, scale=True)
+# #             #opencvImage = cv2.cvtColor(np.array(imag), cv2.COLOR_RGB2BGR)
+# #             opencvImage = np.array(imag)
+# #             cv2.imshow('img', opencvImage)
+# #             cv2.waitKey(0)
+# #             cv2.destroyAllWindows()
